@@ -33,6 +33,7 @@ func init() {
 	transactionCmd.AddCommand(createChannelStepCmd())
 	transactionCmd.AddCommand(updateClientCmd())
 	transactionCmd.AddCommand(rawTransactionCmd)
+	rawTransactionCmd.AddCommand(connInit())
 	rawTransactionCmd.AddCommand(connTry())
 	rawTransactionCmd.AddCommand(connAck())
 	rawTransactionCmd.AddCommand(connConfirm())
@@ -127,16 +128,19 @@ func createClientsCmd() *cobra.Command {
 		Short: "create a clients for dst-chain on src-chain and src-chain on dst-chain",
 		Args:  cobra.ExactArgs(4),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Println("HELLO!!!")
 			src, dst := args[0], args[1]
 			chains, err := config.c.GetChains(src, dst)
 			if err != nil {
 				return err
 			}
+			fmt.Println("goodbye")
 
 			hs, err := relayer.UpdatesWithHeaders(chains[src], chains[dst])
 			if err != nil {
 				return err
 			}
+			fmt.Println("passed updates")
 
 			if err = chains[src].PathClient(args[2]); err != nil {
 				return chains[src].ErrCantSetPath(relayer.CLNTPATH, err)
@@ -148,6 +152,7 @@ func createClientsCmd() *cobra.Command {
 
 			res, err := chains[src].SendMsg(chains[src].CreateClient(hs[dst]))
 			if err != nil {
+				fmt.Print("Did not pass send msg chain src:", chains[src].ChainID)
 				return err
 			}
 
@@ -158,6 +163,7 @@ func createClientsCmd() *cobra.Command {
 
 			res, err = chains[dst].SendMsg(chains[dst].CreateClient(hs[src]))
 			if err != nil {
+				fmt.Println("Did not pass send msg chain dst:", chains[dst].ChainID)
 				return err
 			}
 
@@ -174,6 +180,7 @@ func createConnectionCmd() *cobra.Command {
 		Long:  "FYI: DRAGONS HERE, not tested",
 		Args:  cobra.ExactArgs(6),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Println("ENTER")
 			src, dst := args[0], args[1]
 			chains, err := config.c.GetChains(src, dst)
 			if err != nil {
@@ -406,6 +413,7 @@ func connTry() *cobra.Command {
 				return err
 			}
 
+			fmt.Printf("Header root: %X\n", hs[dst].SignedHeader.Header.AppHash)
 			dstState, err := chains[dst].QueryConnection(hs[dst].Height)
 			if err != nil {
 				return err

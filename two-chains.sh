@@ -1,7 +1,7 @@
 #!/bin/bash
 
-GAIA_DIR="$GOPATH/src/github.com/cosmos/gaia"
-RELAYER_DIR="$GOPATH/src/github.com/cosmos/relayer"
+GAIA_DIR="$GOPATH/github.com/cosmos/gaia"
+RELAYER_DIR="$GOPATH/github.com/cosmos/relayer"
 GAIA_BRANCH=ibc-alpha
 GAIA_CONF=$(mktemp -d)
 RLY_CONF=$(mktemp -d)

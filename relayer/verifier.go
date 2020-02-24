@@ -46,14 +46,17 @@ func UpdatesWithHeaders(chains ...*Chain) (map[string]*tmclient.Header, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println("passed updates")
 	return GetLatestHeaders(chains...)
 }
 
 // UpdateLiteDBToLatestHeader spins up an instance of the lite client as part of the chain.
 func (c *Chain) UpdateLiteDBToLatestHeader() error {
+	fmt.Println("in latest update")
 	// create database connection
 	db, df, err := c.NewLiteDB()
 	if err != nil {
+		fmt.Println("err in creating new litedb")
 		return err
 	}
 	defer df()
@@ -61,6 +64,7 @@ func (c *Chain) UpdateLiteDBToLatestHeader() error {
 	// initialise lite client
 	lc, err := c.InitLiteClientWithoutTrust(db)
 	if err != nil {
+		fmt.Println("error on init")
 		return err
 	}
 
@@ -70,8 +74,11 @@ func (c *Chain) UpdateLiteDBToLatestHeader() error {
 	lc.RemoveNoLongerTrustedHeaders(now)
 
 	// sync lite client to the most recent header of the primary provider
-	return lc.Update(now)
-
+	err = lc.Update(now)
+	if err != nil {
+		fmt.Println("update err")
+	}
+	return err
 }
 
 type safeChainErrors struct {
@@ -150,6 +157,7 @@ func (c *Chain) InitLiteClient(db *dbm.GoLevelDB, trustOpts lite.TrustOptions) (
 		return nil, err
 	}
 
+	fmt.Println("lite client creation successful")
 	return lc, nil
 }
 
@@ -326,12 +334,18 @@ func (c *Chain) GetLiteSignedHeaderAtHeight(height int64) (*tmclient.Header, err
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println("chainID:", c.ChainID)
+	fmt.Printf("%#v\n", sh)
 
+	// HACK: For now, just set valset to the same value in both instances
+	// this is definitely wrong but should work for demo purposes
 	// Fetch the validator set from the store
 	// TODO Double-check these heights
 	// TODO Figure out if we can use the light client API more directly here instead of the store
-	vs, err := store.ValidatorSet(height)
+	fmt.Println("height:", height)
+	vs, err := store.ValidatorSet(height + 1)
 	if err != nil {
+		fmt.Println("ehllo?")
 		return nil, err
 	}
 
@@ -344,6 +358,8 @@ func (c *Chain) GetLiteSignedHeaderAtHeight(height int64) (*tmclient.Header, err
 	if err = header.ValidateBasic(c.ChainID); err != nil {
 		panic(fmt.Sprintf("header failed ValidateBasic: %s", err))
 	}
+
+	fmt.Println("Made heade")
 
 	return &header, nil
 }

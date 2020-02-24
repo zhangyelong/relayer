@@ -1,6 +1,7 @@
 package relayer
 
 import (
+	"fmt"
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -24,6 +25,7 @@ var (
 func (src *Chain) CreateConnection(dst *Chain, timeout time.Duration) error {
 	ticker := time.NewTicker(timeout)
 	for ; true; <-ticker.C {
+		fmt.Println("ENTER LOOP")
 		msgs, err := src.CreateConnectionStep(dst)
 		if err != nil {
 			return err
@@ -32,6 +34,8 @@ func (src *Chain) CreateConnection(dst *Chain, timeout time.Duration) error {
 		if !msgs.Ready() {
 			break
 		}
+
+		fmt.Printf("%v\n", msgs.Src)
 
 		// Submit the transactions to src chain
 		srcRes, err := src.SendMsgs(msgs.Src)
@@ -90,6 +94,7 @@ func (src *Chain) CreateConnectionStep(dst *Chain) (*RelayMsgs, error) {
 	switch {
 	// Handshake hasn't been started on src or dst, relay `connOpenInit` to src
 	case srcEnd.Connection.State == connState.UNINITIALIZED && dstEnd.Connection.State == connState.UNINITIALIZED:
+		fmt.Println("here")
 		out.Src = append(out.Src, src.ConnInit(dst))
 
 	// Handshake has started on dst (1 stepdone), relay `connOpenTry` and `updateClient` on src

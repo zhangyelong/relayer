@@ -83,8 +83,10 @@ func initLiteCmd() *cobra.Command {
 					return err
 				}
 			case height > 0 && len(hash) > 0: // height and hash are given
+				fmt.Println("lite height:", height)
 				_, err = chain.InitLiteClient(db, chain.TrustOptions(height, hash))
 				if err != nil {
+					fmt.Println("hello")
 					return wrapInitFailed(err)
 				}
 			case len(url) > 0: // URL is given, query trust options

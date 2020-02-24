@@ -167,6 +167,7 @@ func (c *Chain) QueryConnection(height int64) (connTypes.ConnectionResponse, err
 	if err := c.PathEnd.Validate(CONNPATH); !c.PathSet() && err != nil {
 		return connTypes.ConnectionResponse{}, c.ErrPathNotSet(CONNPATH, err)
 	}
+	fmt.Println("Queried Height:", height)
 
 	req := abci.RequestQuery{
 		Path:   "store/ibc/key",
@@ -186,6 +187,10 @@ func (c *Chain) QueryConnection(height int64) (connTypes.ConnectionResponse, err
 	if err := c.Amino.UnmarshalBinaryLengthPrefixed(res.Value, &connection); err != nil {
 		return connTypes.ConnectionResponse{}, err
 	}
+
+	fmt.Printf("Query Connection:\n%#v\n", res)
+	fmt.Printf("CONNECTION:\n%#v\n", connection)
+	fmt.Printf("Proof:\n%#v\n", res.Proof)
 
 	return connTypes.NewConnectionResponse(c.PathEnd.ConnectionID, connection, res.Proof, res.Height), nil
 }
