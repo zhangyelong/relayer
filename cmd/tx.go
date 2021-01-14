@@ -16,31 +16,48 @@ limitations under the License.
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
-	"strconv"
+	"io/ioutil"
+	"os"
+	"strings"
+	"time"
 
+	"github.com/cosmos/cosmos-sdk/client/flags"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	chanTypes "github.com/cosmos/cosmos-sdk/x/ibc/04-channel/types"
-	tmclient "github.com/cosmos/cosmos-sdk/x/ibc/07-tendermint/types"
-	"github.com/iqlusioninc/relayer/relayer"
+	upgradetypes "github.com/cosmos/cosmos-sdk/x/upgrade/types"
+	"github.com/cosmos/relayer/relayer"
 	"github.com/spf13/cobra"
 )
 
 // transactionCmd represents the tx command
 func transactionCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "transactions",
+		Use:     "transact",
 		Aliases: []string{"tx"},
 		Short:   "IBC Transaction Commands",
+		Long: strings.TrimSpace(`Commands to create IBC transactions on configured chains. 
+		Most of these commands take a '[path]' argument. Make sure:
+	1. Chains are properly configured to relay over by using the 'rly chains list' command
+	2. Path is properly configured to relay over by using the 'rly paths list' command`),
 	}
 
 	cmd.AddCommand(
+		linkCmd(),
+		linkThenStartCmd(),
+		relayMsgsCmd(),
+		relayAcksCmd(),
+		xfersend(),
+		flags.LineBreak,
 		createClientsCmd(),
+		updateClientsCmd(),
+		upgradeClientsCmd(),
+		upgradeChainCmd(),
 		createConnectionCmd(),
 		createChannelCmd(),
-		fullPathCmd(),
+		closeChannelCmd(),
+		flags.LineBreak,
 		rawTransactionCmd(),
-		transferCmd(),
 	)
 
 	return cmd
@@ -48,40 +65,120 @@ func transactionCmd() *cobra.Command {
 
 func createClientsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "clients [src-chain-id] [dst-chain-id]",
-		Short: "create a clients between two configured chains with a configured path",
-		Args:  cobra.RangeArgs(2, 3),
+		Use:     "clients [path-name]",
+		Aliases: []string{"clnts"},
+		Short:   "create a clients between two configured chains with a configured path",
+		Long: "Creates a working ibc client for chain configured on each end of the" +
+			" path by querying headers from each chain and then sending the corresponding create-client messages",
+		Args: cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact clients demo-path
+$ %s tx clnts demo-path`, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src, dst := args[0], args[1]
-			chains, err := config.Chains.Gets(src, dst)
+			c, src, dst, err := config.ChainsFromPath(args[0])
 			if err != nil {
 				return err
 			}
 
-			pth, err := cmd.Flags().GetString(flagPath)
-			if err != nil {
+			// ensure that keys exist
+			if _, err = c[src].GetAddress(); err != nil {
+				return err
+			}
+			if _, err = c[dst].GetAddress(); err != nil {
 				return err
 			}
 
-			if _, err = setPathsFromArgs(chains[src], chains[dst], pth); err != nil {
-				return err
+			modified, err := c[src].CreateClients(c[dst])
+			if modified {
+				if err := overWriteConfig(cmd, config); err != nil {
+					return err
+				}
 			}
 
-			return chains[src].CreateClients(chains[dst])
+			return err
 		},
 	}
-	return pathFlag(cmd)
+	return cmd
+}
+
+func updateClientsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "update-clients [path-name]",
+		Aliases: []string{"update", "uc"},
+		Short:   "update a clients between two configured chains with a configured path",
+		Long: "Updates a working ibc client for chain configured on each end of the " +
+			"path by querying headers from each chain and then sending the corresponding update-client messages",
+		Args: cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact update-clients demo-path
+$ %s tx update demo-path
+$ %s tx uc demo-path`, appName, appName, appName)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, src, dst, err := config.ChainsFromPath(args[0])
+			if err != nil {
+				return err
+			}
+
+			// ensure that keys exist
+			if _, err = c[src].GetAddress(); err != nil {
+				return err
+			}
+			if _, err = c[dst].GetAddress(); err != nil {
+				return err
+			}
+
+			return c[src].UpdateClients(c[dst])
+		},
+	}
+	return cmd
+}
+
+func upgradeClientsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "upgrade-clients [path-name] [chain-id]",
+		Aliases: []string{"upgrade"},
+		Short:   "upgrade a client on the provided chain-id",
+		Args:    cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, src, dst, err := config.ChainsFromPath(args[0])
+			if err != nil {
+				return err
+			}
+
+			// ensure that keys exist
+			if _, err = c[src].GetAddress(); err != nil {
+				return err
+			}
+			if _, err = c[dst].GetAddress(); err != nil {
+				return err
+			}
+
+			targetChainID := args[1]
+			// send the upgrade message on the targetChainID
+			if src == targetChainID {
+				return c[src].UpgradeClients(c[dst])
+			}
+
+			return c[dst].UpgradeClients(c[src])
+		},
+	}
+	return cmd
 }
 
 func createConnectionCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "connection [src-chain-id] [dst-chain-id] [[path-name]]",
-		Short: "create a connection between two configured chains with a configured path",
-		Long:  "This command is meant to be used to repair or create a connection between two chains with a configured path in the config file",
-		Args:  cobra.RangeArgs(2, 3),
+		Use:     "connection [path-name]",
+		Aliases: []string{"conn", "con"},
+		Short:   "create a connection between two configured chains with a configured path",
+		Long: strings.TrimSpace(`This command is meant to be used to repair or create 
+		a connection between two chains with a configured path in the config file`),
+		Args: cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact connection demo-path
+$ %s tx conn demo-path --timeout 5s
+$ %s tx con demo-path -o 3s`, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src, dst := args[0], args[1]
-			chains, err := config.Chains.Gets(src, dst)
+			c, src, dst, err := config.ChainsFromPath(args[0])
 			if err != nil {
 				return err
 			}
@@ -91,31 +188,43 @@ func createConnectionCmd() *cobra.Command {
 				return err
 			}
 
-			pth, err := cmd.Flags().GetString(flagPath)
-			if err != nil {
+			// ensure that keys exist
+			if _, err = c[src].GetAddress(); err != nil {
+				return err
+			}
+			if _, err = c[dst].GetAddress(); err != nil {
 				return err
 			}
 
-			if _, err = setPathsFromArgs(chains[src], chains[dst], pth); err != nil {
-				return err
+			// TODO: make '3' be a flag, maximum retries after failed message send
+			modified, err := c[src].CreateOpenConnections(c[dst], 3, to)
+			if modified {
+				if err := overWriteConfig(cmd, config); err != nil {
+					return err
+				}
 			}
 
-			return chains[src].CreateConnection(chains[dst], to)
+			return err
 		},
 	}
 
-	return pathFlag(timeoutFlag(cmd))
+	return timeoutFlag(cmd)
 }
 
 func createChannelCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "channel [src-chain-id] [dst-chain-id]",
-		Short: "create a channel between two configured chains with a configured path",
-		Long:  "This command is meant to be used to repair or create a channel between two chains with a configured path in the config file",
-		Args:  cobra.RangeArgs(2, 3),
+		Use:     "channel [path-name]",
+		Aliases: []string{"chan", "ch"},
+		Short:   "create a channel between two configured chains with a configured path",
+		Long: strings.TrimSpace(`This command is meant to be used to repair or 
+		create a channel between two chains with a configured path in the config file`),
+		Args: cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact channel demo-path
+$ %s tx chan demo-path --timeout 5s
+$ %s tx ch demo-path -o 3s`, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src, dst := args[0], args[1]
-			chains, err := config.Chains.Gets(src, dst)
+			c, src, dst, err := config.ChainsFromPath(args[0])
 			if err != nil {
 				return err
 			}
@@ -125,30 +234,44 @@ func createChannelCmd() *cobra.Command {
 				return err
 			}
 
-			pth, err := cmd.Flags().GetString(flagPath)
-			if err != nil {
+			// ensure that keys exist
+			if _, err = c[src].GetAddress(); err != nil {
+				return err
+			}
+			if _, err = c[dst].GetAddress(); err != nil {
 				return err
 			}
 
-			if _, err = setPathsFromArgs(chains[src], chains[dst], pth); err != nil {
-				return err
+			// TODO: make '3' a flag, max retries after failed message send
+			modified, err := c[src].CreateOpenChannels(c[dst], 3, to)
+			if modified {
+				if err := overWriteConfig(cmd, config); err != nil {
+					return err
+				}
 			}
 
-			return chains[src].CreateChannel(chains[dst], true, to)
+			return err
+
 		},
 	}
 
-	return pathFlag(timeoutFlag(cmd))
+	return timeoutFlag(cmd)
 }
 
-func fullPathCmd() *cobra.Command {
+func closeChannelCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "full-path [src-chain-id] [dst-chain-id]",
-		Short: "create clients, connection, and channel between two configured chains with a configured path",
-		Args:  cobra.RangeArgs(2, 3),
+		Use:     "channel-close [path-name]",
+		Aliases: []string{"chan-cl", "close", "cl"},
+		Short:   "close a channel between two configured chains with a configured path",
+		Long:    "This command is meant to close a channel",
+		Args:    cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact channel-close demo-path
+$ %s tx chan-cl demo-path --timeout 5s
+$ %s tx cl demo-path
+$ %s tx close demo-path -o 3s`, appName, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src, dst := args[0], args[1]
-			chains, err := config.Chains.Gets(src, dst)
+			c, src, dst, err := config.ChainsFromPath(args[0])
 			if err != nil {
 				return err
 			}
@@ -158,213 +281,268 @@ func fullPathCmd() *cobra.Command {
 				return err
 			}
 
-			pth, err := cmd.Flags().GetString(flagPath)
-			if err != nil {
+			// ensure that keys exist
+			if _, err = c[src].GetAddress(); err != nil {
+				return err
+			}
+			if _, err = c[dst].GetAddress(); err != nil {
 				return err
 			}
 
-			if _, err = setPathsFromArgs(chains[src], chains[dst], pth); err != nil {
-				return err
-			}
-
-			// Check if clients have been created, if not create them
-			if err = chains[src].CreateClients(chains[dst]); err != nil {
-				return err
-			}
-
-			// Check if connection has been created, if not create it
-			if err = chains[src].CreateConnection(chains[dst], to); err != nil {
-				return err
-			}
-
-			// NOTE: this is hardcoded to create ordered channels right now. Add a flag here to toggle
-			// Check if channel has been created, if not create it
-			return chains[src].CreateChannel(chains[dst], true, to)
+			return c[src].CloseChannel(c[dst], to)
 		},
 	}
 
-	return pathFlag(timeoutFlag(cmd))
+	return timeoutFlag(cmd)
 }
 
-func transferCmd() *cobra.Command {
+func linkCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "transfer [src-chain-id] [dst-chain-id] [amount] [is-source] [dst-chain-addr]",
-		Short: "transfer",
-		Long:  "This sends tokens from a relayers configured wallet on chain src to a dst addr on dst",
-		Args:  cobra.ExactArgs(5),
+		Use:     "link [path-name]",
+		Aliases: []string{"full-path", "connect", "path", "pth"},
+		Short:   "create clients, connection, and channel between two configured chains with a configured path",
+		Args:    cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact link demo-path
+$ %s tx full-path demo-path --timeout 5s
+$ %s tx connect demo-path
+$ %s tx path demo-path -o 3s
+$ %s tx pth demo-path`, appName, appName, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src, dst := args[0], args[1]
-			chains, err := config.Chains.Gets(src, dst)
+			c, src, dst, err := config.ChainsFromPath(args[0])
 			if err != nil {
 				return err
 			}
 
-			pth, err := cmd.Flags().GetString(flagPath)
+			to, err := getTimeout(cmd)
 			if err != nil {
 				return err
 			}
 
-			if _, err = setPathsFromArgs(chains[src], chains[dst], pth); err != nil {
+			// ensure that keys exist
+			if _, err = c[src].GetAddress(); err != nil {
+				return err
+			}
+			if _, err = c[dst].GetAddress(); err != nil {
 				return err
 			}
 
-			amount, err := sdk.ParseCoin(args[2])
+			// create clients if they aren't already created
+			modified, err := c[src].CreateClients(c[dst])
+			if modified {
+				overWriteConfig(cmd, config)
+			}
+
 			if err != nil {
 				return err
 			}
 
-			// If there is a path seperator in the denom of the coins being sent,
-			// then src is not the source, otherwise it is
-			// NOTE: this will not work in the case where tokens are sent from A -> B -> C
-			// Need a function in the SDK to determine from a denom if the tokens are from this chain
-			// TODO: Refactor this in the SDK.
-			source, err := strconv.ParseBool(args[3])
-			if err != nil {
-				return err
-			}
-
-			if source {
-				amount.Denom = fmt.Sprintf("%s/%s/%s", chains[dst].PathEnd.PortID, chains[dst].PathEnd.ChannelID, amount.Denom)
-			} else {
-				amount.Denom = fmt.Sprintf("%s/%s/%s", chains[src].PathEnd.PortID, chains[src].PathEnd.ChannelID, amount.Denom)
-			}
-
-			dstAddr, err := sdk.AccAddressFromBech32(args[4])
-			if err != nil {
-				return err
-			}
-
-			dstHeader, err := chains[dst].UpdateLiteWithHeader()
-			if err != nil {
-				return err
-			}
-
-			// MsgTransfer will call SendPacket on src chain
-			txs := relayer.RelayMsgs{
-				Src: []sdk.Msg{chains[src].PathEnd.MsgTransfer(chains[dst].PathEnd, dstHeader.GetHeight(), sdk.NewCoins(amount), dstAddr, source, chains[src].MustGetAddress())},
-				Dst: []sdk.Msg{},
-			}
-
-			if txs.Send(chains[src], chains[dst]); !txs.Success() {
-				return fmt.Errorf("failed to send first transaction")
-			}
-
-			// Working on SRC chain :point_up:
-			// Working on DST chain :point_down:
-
-			var (
-				hs           map[string]*tmclient.Header
-				seqRecv      chanTypes.RecvResponse
-				seqSend      uint64
-				srcCommitRes relayer.CommitmentResponse
-			)
-
-			for {
-				hs, err = relayer.UpdatesWithHeaders(chains[src], chains[dst])
-				if err != nil {
+			// TODO: make '3' a flag, maximum retries after failed message send
+			// create connection if it isn't already created
+			modified, err = c[src].CreateOpenConnections(c[dst], 3, to)
+			if modified {
+				if err := overWriteConfig(cmd, config); err != nil {
 					return err
 				}
-
-				seqRecv, err = chains[dst].QueryNextSeqRecv(hs[dst].Height)
-				if err != nil {
-					return err
-				}
-
-				seqSend, err = chains[src].QueryNextSeqSend(hs[src].Height)
-				if err != nil {
-					return err
-				}
-
-				srcCommitRes, err = chains[src].QueryPacketCommitment(hs[src].Height-1, int64(seqSend-1))
-				if err != nil {
-					return err
-				}
-
-				if srcCommitRes.Proof.Proof == nil {
-					continue
-				} else {
-					break
-				}
+			}
+			if err != nil {
+				return err
 			}
 
-			// reconstructing packet data here instead of retrieving from an indexed node
-			xferPacket := chains[src].PathEnd.XferPacket(
-				sdk.NewCoins(amount),
-				chains[src].MustGetAddress(),
-				dstAddr,
-				source,
-				dstHeader.GetHeight()+1000,
-			)
+			// create channel if it isn't already created
+			modified, err = c[src].CreateOpenChannels(c[dst], 3, to)
+			if modified {
+				if err := overWriteConfig(cmd, config); err != nil {
+					return err
+				}
+			}
+			return err
+		},
+	}
 
-			// Debugging by simply passing in the packet information that we know was sent earlier in the SendPacket
-			// part of the command. In a real relayer, this would be a separate command that retrieved the packet
-			// information from an indexing node
-			txs = relayer.RelayMsgs{
-				Dst: []sdk.Msg{
-					chains[dst].PathEnd.UpdateClient(hs[src], chains[dst].MustGetAddress()),
-					chains[dst].PathEnd.MsgRecvPacket(
-						chains[src].PathEnd,
-						seqRecv.NextSequenceRecv,
-						xferPacket,
-						chanTypes.NewPacketResponse(
-							chains[src].PathEnd.PortID,
-							chains[src].PathEnd.ChannelID,
-							seqSend-1,
-							chains[src].PathEnd.NewPacket(
-								chains[dst].PathEnd,
-								seqSend-1,
-								xferPacket,
-							),
-							srcCommitRes.Proof.Proof,
-							int64(srcCommitRes.ProofHeight),
-						),
-						chains[dst].MustGetAddress(),
-					),
-				},
-				Src: []sdk.Msg{},
+	return timeoutFlag(cmd)
+}
+
+func linkThenStartCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "link-then-start [path-name]",
+		Short: "wait for a link to come up, then start relaying packets",
+		Args:  cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact link-then-start demo-path
+$ %s tx link-then-start demo-path --timeout 5s`, appName, appName)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			lCmd := linkCmd()
+			for err := lCmd.RunE(cmd, args); err != nil; err = lCmd.RunE(cmd, args) {
+				fmt.Printf("retrying link: %s\n", err)
+				time.Sleep(1 * time.Second)
+			}
+			sCmd := startCmd()
+			return sCmd.RunE(cmd, args)
+		},
+	}
+	return strategyFlag(timeoutFlag(cmd))
+}
+
+func relayMsgsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "relay-packets [path-name]",
+		Aliases: []string{"rly", "pkts", "relay"},
+		Short:   "relay any packets that remain to be relayed on a given path, in both directions",
+		Args:    cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact relay-packets demo-path
+$ %s tx rly demo-path -l 3
+$ %s tx pkts demo-path -s 5
+$ %s tx relay demo-path`, appName, appName, appName, appName)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, src, dst, err := config.ChainsFromPath(args[0])
+			if err != nil {
+				return err
 			}
 
-			txs.Send(chains[src], chains[dst])
+			if err = ensureKeysExist(c); err != nil {
+				return err
+			}
+
+			sh, err := relayer.NewSyncHeaders(c[src], c[dst])
+			if err != nil {
+				return err
+			}
+
+			strategy, err := GetStrategyWithOptions(cmd, config.Paths.MustGet(args[0]).MustGetStrategy())
+			if err != nil {
+				return err
+			}
+
+			sp, err := strategy.UnrelayedSequences(c[src], c[dst], sh)
+			if err != nil {
+				return err
+			}
+
+			if err = strategy.RelayPackets(c[src], c[dst], sp, sh); err != nil {
+				return err
+			}
+
 			return nil
 		},
 	}
-	return pathFlag(cmd)
+
+	return strategyFlag(cmd)
 }
 
-func setPathsFromArgs(src, dst *relayer.Chain, name string) (*relayer.Path, error) {
-	// Find any configured paths between the chains
-	paths, err := config.Paths.PathsFromChains(src.ChainID, dst.ChainID)
-	if err != nil {
-		return nil, err
+func relayAcksCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "relay-acknowledgements [path-name]",
+		Aliases: []string{"acks"},
+		Short:   "relay any acknowledgements that remain to be relayed on a given path, in both directions",
+		Args:    cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact relay-acknowledgements demo-path
+$ %s tx acks demo-path -l 3 -s 6`, appName, appName)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, src, dst, err := config.ChainsFromPath(args[0])
+			if err != nil {
+				return err
+			}
+
+			if err = ensureKeysExist(c); err != nil {
+				return err
+			}
+
+			sh, err := relayer.NewSyncHeaders(c[src], c[dst])
+			if err != nil {
+				return err
+			}
+
+			strategy, err := GetStrategyWithOptions(cmd, config.Paths.MustGet(args[0]).MustGetStrategy())
+			if err != nil {
+				return err
+			}
+
+			// sp.Src contains all sequences acked on SRC but acknowledgement not processed on DST
+			// sp.Dst contains all sequences acked on DST but acknowledgement not processed on SRC
+			sp, err := strategy.UnrelayedAcknowledgements(c[src], c[dst], sh)
+			if err != nil {
+				return err
+			}
+
+			if err = strategy.RelayAcknowledgements(c[src], c[dst], sp, sh); err != nil {
+				return err
+			}
+
+			return nil
+		},
 	}
 
-	// Given the number of args and the number of paths,
-	// work on the appropriate path
-	var path *relayer.Path
-	switch {
-	case name != "" && len(paths) > 1:
-		if path, err = paths.Get(name); err != nil {
-			return path, err
+	return strategyFlag(cmd)
+}
+
+func upgradeChainCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "upgrade-chain [path-name] [chain-id] [new-unbonding-period] [deposit] [path/to/upgradePlan.json]",
+		Short: "upgrade a chain by providing the chain-id of the chain being upgraded, the new unbonding period, the proposal deposit and the json file of the upgrade plan without the upgrade client state ",
+		Args:  cobra.ExactArgs(5),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, src, dst, err := config.ChainsFromPath(args[0])
+			if err != nil {
+				return err
+			}
+
+			targetChainID := args[1]
+
+			unbondingPeriod, err := time.ParseDuration(args[2])
+			if err != nil {
+				return err
+			}
+
+			// ensure that keys exist
+			if _, err = c[src].GetAddress(); err != nil {
+				return err
+			}
+			if _, err = c[dst].GetAddress(); err != nil {
+				return err
+			}
+
+			// parse deposit
+			deposit, err := sdk.ParseCoinNormalized(args[3])
+			if err != nil {
+				return err
+			}
+
+			// parse plan
+			plan := &upgradetypes.Plan{}
+			path := args[4]
+			if _, err := os.Stat(path); err != nil {
+				return err
+			}
+
+			byt, err := ioutil.ReadFile(path)
+			if err != nil {
+				return err
+			}
+
+			if err = json.Unmarshal(byt, plan); err != nil {
+				return err
+			}
+
+			// send the upgrade message on the targetChainID
+			if src == targetChainID {
+				return c[src].UpgradeChain(c[dst], plan, deposit, unbondingPeriod)
+			}
+
+			return c[dst].UpgradeChain(c[src], plan, deposit, unbondingPeriod)
+		},
+	}
+	return cmd
+}
+
+// Returns an error if a configured key for a given chain doesn't exist
+func ensureKeysExist(chains map[string]*relayer.Chain) (err error) {
+	for _, v := range chains {
+		if _, err = v.GetAddress(); err != nil {
+			return
 		}
-	case name != "" && len(paths) == 1:
-		if path, err = paths.Get(name); err != nil {
-			return path, err
-		}
-	case name == "" && len(paths) > 1:
-		return nil, fmt.Errorf("more than one path between %s and %s exists, pass in path name", src, dst)
-	case name == "" && len(paths) == 1:
-		for _, v := range paths {
-			path = v
-		}
 	}
-
-	if err = src.SetPath(path.End(src.ChainID)); err != nil {
-		return nil, err
-	}
-
-	if err = dst.SetPath(path.End(dst.ChainID)); err != nil {
-		return nil, err
-	}
-
-	return path, nil
+	return nil
 }

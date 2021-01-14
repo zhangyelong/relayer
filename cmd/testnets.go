@@ -8,11 +8,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/relayer/relayer"
 	"github.com/gorilla/mux"
-	"github.com/iqlusioninc/relayer/relayer"
 	"github.com/spf13/cobra"
 )
 
@@ -20,86 +21,25 @@ func testnetsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "testnets",
 		Aliases: []string{"tst"},
-		Short:   "commands for managing and using relayer faucets",
+		Short:   "commands for joining and running relayer testnets",
 	}
 	cmd.AddCommand(
 		faucetStartCmd(),
 		faucetRequestCmd(),
-		gaiaServiceCmd(),
-		faucetService(),
 	)
-	return cmd
-}
-
-func gaiaServiceCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "gaia-service [user]",
-		Short: "gaia-service returns a sample gaiad service file",
-		Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf(`[Unit]
-Description=gaiad
-After=network.target
-[Service]
-Type=simple
-User=%s
-WorkingDirectory=/home/%s
-ExecStart=/home/%s/go/bin/gaiad start
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=4096
-[Install]
-WantedBy=multi-user.target
-`, args[0], args[0], args[0])
-			return
-		},
-	}
-	return cmd
-}
-
-func faucetService() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "faucet-service [user] [chain-id] [key-name] [amount]",
-		Short: "faucet-service returns a sample faucet service file",
-		Args:  cobra.ExactArgs(4),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, err := config.Chains.Get(args[1])
-			if err != nil {
-				return err
-			}
-			_, err = chain.Keybase.Get(args[2])
-			if err != nil {
-				return err
-			}
-			_, err = sdk.ParseCoin(args[3])
-			if err != nil {
-				return err
-			}
-			fmt.Printf(`[Unit]
-Description=faucet
-After=network.target
-[Service]
-Type=simple
-User=%s
-WorkingDirectory=/home/%s
-ExecStart=/home/%s/go/bin/relayer testnets faucet %s %s %s
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=4096
-[Install]
-WantedBy=multi-user.target
-`, args[0], args[0], args[0], args[1], args[2], args[3])
-			return nil
-		},
-	}
 	return cmd
 }
 
 func faucetRequestCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "request [chain-id] [key-name]",
-		Short: "request tokens from a relayer faucet",
-		Args:  cobra.ExactArgs(2),
+		Use:     "request [chain-id] [[key-name]]",
+		Aliases: []string{"req"},
+		Short:   "request tokens from a relayer faucet",
+		Args:    cobra.RangeArgs(1, 2),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s testnets request ibc-0 --url http://0.0.0.0:8000
+$ %s testnets request ibc-0 testkey --url http://0.0.0.0:8000
+$ %s tst req ibc-0`, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			chain, err := config.Chains.Get(args[0])
 			if err != nil {
@@ -125,7 +65,14 @@ func faucetRequestCmd() *cobra.Command {
 				urlString = fmt.Sprintf("%s://%s:%d", u.Scheme, host, 8000)
 			}
 
-			info, err := chain.Keybase.Get(args[1])
+			var keyName string
+			if len(args) == 2 {
+				keyName = args[1]
+			} else {
+				keyName = chain.Key
+			}
+
+			info, err := chain.Keybase.Key(keyName)
 			if err != nil {
 				return err
 			}
@@ -134,7 +81,7 @@ func faucetRequestCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
+			//nolint:gosec // Potential HTTP request made with variable url
 			resp, err := http.Post(urlString, "application/json", bytes.NewBuffer(body))
 			if err != nil {
 				return err
@@ -158,16 +105,19 @@ func faucetStartCmd() *cobra.Command {
 		Use:   "faucet [chain-id] [key-name] [amount]",
 		Short: "listens on a port for requests for tokens",
 		Args:  cobra.ExactArgs(3),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s testnets faucet ibc-0 testkey 100000stake --listen http://0.0.0.0:8081
+$ %s tst faucet ibc-0 testkey 100000stake`, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			chain, err := config.Chains.Get(args[0])
 			if err != nil {
 				return err
 			}
-			info, err := chain.Keybase.Get(args[1])
+			info, err := chain.Keybase.Key(args[1])
 			if err != nil {
 				return err
 			}
-			amount, err := sdk.ParseCoin(args[2])
+			amount, err := sdk.ParseCoinsNormalized(args[2])
 			if err != nil {
 				return err
 			}

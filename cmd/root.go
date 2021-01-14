@@ -17,44 +17,42 @@ package cmd
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"strings"
 
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	"github.com/cosmos/cosmos-sdk/codec"
-	codecstd "github.com/cosmos/cosmos-sdk/codec/std"
-	"github.com/cosmos/cosmos-sdk/simapp"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
+const (
+	MB = 1048576 // in bytes
+)
+
 var (
-	cfgPath     string
 	homePath    string
 	debug       bool
 	config      *Config
 	defaultHome = os.ExpandEnv("$HOME/.relayer")
-	cdc         *codec.Codec
-	appCodec    *codecstd.Codec
+	appName     = "rly"
 
 	// Default identifiers for dummy usage
 	dcli = "defaultclientid"
 	dcon = "defaultconnectionid"
 	dcha = "defaultchannelid"
 	dpor = "defaultportid"
+	dord = "ordered"
 )
 
 func init() {
-	// Register top level flags --home and --config
-	// TODO: just rely on homePath and remove the config path arg?
+	cobra.EnableCommandSorting = false
+
+	rootCmd.SilenceUsage = true
+
+	// Register top level flags --home and --debug
 	rootCmd.PersistentFlags().StringVar(&homePath, flags.FlagHome, defaultHome, "set home directory")
 	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "debug output")
-	rootCmd.PersistentFlags().StringVar(&cfgPath, flagConfig, "config.yaml", "set config file")
 	if err := viper.BindPFlag(flags.FlagHome, rootCmd.Flags().Lookup(flags.FlagHome)); err != nil {
-		panic(err)
-	}
-	if err := viper.BindPFlag(flagConfig, rootCmd.Flags().Lookup(flagConfig)); err != nil {
 		panic(err)
 	}
 	if err := viper.BindPFlag("debug", rootCmd.Flags().Lookup("debug")); err != nil {
@@ -63,27 +61,39 @@ func init() {
 
 	// Register subcommands
 	rootCmd.AddCommand(
-		liteCmd,
-		keysCmd,
-		queryCmd,
-		startCmd(),
-		transactionCmd(),
+		configCmd(),
 		chainsCmd(),
 		pathsCmd(),
-		configCmd(),
-		getVersionCmd(),
+		flags.LineBreak,
+		keysCmd(),
+		lightCmd(),
+		flags.LineBreak,
+		transactionCmd(),
+		queryCmd(),
+		startCmd(),
+		flags.LineBreak,
+		devCommand(),
 		testnetsCmd(),
+		getVersionCmd(),
 	)
 
 	// This is a bit of a cheat :shushing_face:
-	cdc = codecstd.MakeCodec(simapp.ModuleBasics)
-	appCodec = codecstd.NewAppCodec(cdc)
+	// cdc = codecstd.MakeCodec(simapp.ModuleBasics)
+	// appCodec = codecstd.NewAppCodec(cdc)
 }
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "relayer",
+	Use:   appName,
 	Short: "This application relays data between configured IBC enabled chains",
+	Long: strings.TrimSpace(`The relayer has commands for:
+  1. Configuration of the Chains and Paths that the relayer with transfer packets over
+  2. Management of keys and light clients on the local machine that will be used to sign and verify txs
+  3. Query and transaction functionality for IBC
+  4. A responsive relaying application that listens on a path
+  5. Commands to assist with development, testnets, and versioning.
+
+NOTE: Most of the commands have aliases that make typing them much quicker (i.e. 'rly tx', 'rly q', etc...)`),
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -95,7 +105,6 @@ func Execute() {
 	}
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
 		os.Exit(1)
 	}
 }

@@ -16,6 +16,13 @@ limitations under the License.
 package cmd
 
 import (
+	"fmt"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+
+	"github.com/cosmos/relayer/relayer"
 	"github.com/spf13/cobra"
 )
 
@@ -23,33 +30,63 @@ import (
 // NOTE: This is basically psuedocode
 func startCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "start [src-chain-id] [dst-chain-id] ",
-		Short: "Start runs the relayer strategy associated with a path between the two chains",
-		Args:  cobra.RangeArgs(2, 3),
+		Use:     "start [path-name]",
+		Aliases: []string{"st"},
+		Short:   "Start the listening relayer on a given path",
+		Args:    cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s start demo-path --max-msgs 3
+$ %s start demo-path2 --max-tx-size 10`, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src, dst := args[0], args[1]
-			chains, err := config.Chains.Gets(src, dst)
+			c, src, dst, err := config.ChainsFromPath(args[0])
 			if err != nil {
 				return err
 			}
 
-			pth, err := cmd.Flags().GetString(flagPath)
+			if err = ensureKeysExist(c); err != nil {
+				return err
+			}
+
+			path := config.Paths.MustGet(args[0])
+			strategy, err := GetStrategyWithOptions(cmd, path.MustGetStrategy())
 			if err != nil {
 				return err
 			}
 
-			path, err := setPathsFromArgs(chains[src], chains[dst], pth)
+			if relayer.SendToController != nil {
+				action := relayer.PathAction{
+					Path: path,
+					Type: "RELAYER_PATH_START",
+				}
+				cont, err := relayer.ControllerUpcall(&action)
+				if !cont {
+					return err
+				}
+			}
+
+			done, err := relayer.RunStrategy(c[src], c[dst], strategy)
 			if err != nil {
 				return err
 			}
 
-			strategy, err := path.GetStrategy()
-			if err != nil {
-				return nil
-			}
-
-			return strategy.Run(chains[src], chains[dst])
+			trapSignal(done)
+			return nil
 		},
 	}
-	return pathFlag(cmd)
+	return strategyFlag(cmd)
+}
+
+// trap signal waits for a SIGINT or SIGTERM and then sends down the done channel
+func trapSignal(done func()) {
+	sigCh := make(chan os.Signal, 1)
+
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// wait for a signal
+	sig := <-sigCh
+	fmt.Println("Signal Received", sig.String())
+	close(sigCh)
+
+	// call the cleanup func
+	done()
 }

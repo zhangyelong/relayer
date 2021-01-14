@@ -2,25 +2,33 @@ package cmd
 
 import (
 	"fmt"
-	"strconv"
+	"strings"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	chanTypes "github.com/cosmos/cosmos-sdk/x/ibc/04-channel/types"
-	"github.com/iqlusioninc/relayer/relayer"
 	"github.com/spf13/cobra"
+
+	"github.com/cosmos/relayer/relayer"
 )
 
 // NOTE: These commands are registered over in cmd/raw.go
 
 func xfersend() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "xfer-send [src-chain-id] [dst-chain-id] [amount] [source] [dst-addr]",
-		Short: "xfer-send",
-		Long:  "This sends tokens from a relayers configured wallet on chain src to a dst addr on dst",
-		Args:  cobra.ExactArgs(5),
+		Use:     "transfer [src-chain-id] [dst-chain-id] [amount] [dst-addr]",
+		Short:   "Initiate a transfer from one chain to another",
+		Aliases: []string{"xfer", "txf", "send"},
+		Long: "Sends the first step to transfer tokens in an IBC transfer." +
+			" The created packet must be relayed to another chain",
+		Args: cobra.ExactArgs(4),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s transact transfer ibc-0 ibc-1 100000stake cosmos1skjwj5whet0lpe65qaq4rpq03hjxlwd9nf39lk --path demo-path
+$ %s tx xfer ibc-0 ibc-1 100000stake cosmos1skjwj5whet0lpe65qaq4rpq03hjxlwd9nf39lk --path demo -y 2 -c 10
+$ %s tx txf ibc-0 ibc-1 100000stake cosmos1skjwj5whet0lpe65qaq4rpq03hjxlwd9nf39lk --path demo
+$ %s tx raw send ibc-0 ibc-1 100000stake cosmos1skjwj5whet0lpe65qaq4rpq03hjxlwd9nf39lk --path demo -c 5
+`, appName, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			src, dst := args[0], args[1]
-			chains, err := config.Chains.Gets(src, dst)
+			c, err := config.Chains.Gets(src, dst)
 			if err != nil {
 				return err
 			}
@@ -30,117 +38,100 @@ func xfersend() *cobra.Command {
 				return err
 			}
 
-			if _, err = setPathsFromArgs(chains[src], chains[dst], pth); err != nil {
+			if _, err = setPathsFromArgs(c[src], c[dst], pth); err != nil {
 				return err
 			}
 
-			amount, err := sdk.ParseCoin(args[2])
+			amount, err := sdk.ParseCoinNormalized(args[2])
 			if err != nil {
 				return err
 			}
 
-			// If there is a path seperator in the denom of the coins being sent,
-			// then src is not the source, otherwise it is
-			// NOTE: this will not work in the case where tokens are sent from A -> B -> C
-			// Need a function in the SDK to determine from a denom if the tokens are from this chain
-			// TODO: Refactor this in the SDK.
-			source, err := strconv.ParseBool(args[3])
+			srch, err := c[src].QueryLatestHeight()
 			if err != nil {
 				return err
 			}
 
-			if source {
-				amount.Denom = fmt.Sprintf("%s/%s/%s", chains[dst].PathEnd.PortID, chains[dst].PathEnd.ChannelID, amount.Denom)
-			} else {
-				amount.Denom = fmt.Sprintf("%s/%s/%s", chains[src].PathEnd.PortID, chains[src].PathEnd.ChannelID, amount.Denom)
-			}
-
-			dstAddr, err := sdk.AccAddressFromBech32(args[4])
+			dts, err := c[src].QueryDenomTraces(0, 1000, srch)
 			if err != nil {
 				return err
 			}
 
-			dstHeader, err := chains[dst].UpdateLiteWithHeader()
+			for _, d := range dts.DenomTraces {
+				if amount.Denom == d.GetFullDenomPath() {
+					amount = sdk.NewCoin(d.IBCDenom(), amount.Amount)
+				}
+			}
+
+			toHeightOffset, err := cmd.Flags().GetUint64(flagTimeoutHeightOffset)
 			if err != nil {
 				return err
 			}
 
-			// MsgTransfer will call SendPacket on src chain
-			txs := relayer.RelayMsgs{
-				Src: []sdk.Msg{chains[src].PathEnd.MsgTransfer(chains[dst].PathEnd, dstHeader.GetHeight(), sdk.NewCoins(amount), dstAddr, source, chains[src].MustGetAddress())},
-				Dst: []sdk.Msg{},
+			toTimeOffset, err := cmd.Flags().GetDuration(flagTimeoutTimeOffset)
+			if err != nil {
+				return err
 			}
 
-			if txs.Send(chains[src], chains[dst]); !txs.Success() {
-				return fmt.Errorf("failed to send first transaction")
+			done := c[dst].UseSDKContext()
+			dstAddr, err := sdk.AccAddressFromBech32(args[3])
+			if err != nil {
+				return err
+			}
+			done()
+
+			switch {
+			case toHeightOffset > 0 && toTimeOffset > 0:
+				return fmt.Errorf("cannot set both --timeout-height-offset and --timeout-time-offset, choose one")
+			case toHeightOffset > 0:
+				return c[src].SendTransferMsg(c[dst], amount, dstAddr, toHeightOffset, 0)
+			case toTimeOffset > 0:
+				return c[src].SendTransferMsg(c[dst], amount, dstAddr, 0, toTimeOffset)
+			case toHeightOffset == 0 && toTimeOffset == 0:
+				return c[src].SendTransferMsg(c[dst], amount, dstAddr, 0, 0)
+			default:
+				return fmt.Errorf("shouldn't be here")
 			}
 
-			return nil
 		},
 	}
-	return pathFlag(cmd)
+	return timeoutFlags(pathFlag(cmd))
 }
 
-// UNTESTED: Currently filled with incorrect logic to make code compile
-func xferrecv() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "xfer-recv [src-chain-id] [dst-chain-id] [src-chan-id] [dst-chan-id] [src-port-id] [dst-port-id] [amount] [dst-addr]",
-		Short: "xfer-recv",
-		Long:  "recives tokens sent from dst to src",
-		Args:  cobra.ExactArgs(8),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			src, dst := args[0], args[1]
-			chains, err := config.Chains.Gets(src, dst)
-			if err != nil {
-				return err
-			}
-
-			if err = chains[src].AddPath(dcli, dcon, args[2], args[4]); err != nil {
-				return err
-			}
-
-			if err = chains[dst].AddPath(dcli, dcon, args[3], args[5]); err != nil {
-				return err
-			}
-
-			hs, err := relayer.UpdatesWithHeaders(chains[src], chains[dst])
-			if err != nil {
-				return err
-			}
-
-			seqRecv, err := chains[src].QueryNextSeqRecv(hs[src].Height - 1)
-			if err != nil {
-				return err
-			}
-
-			// seqSend, err := chains[dst].QueryNextSeqSend(hs[dst].Height - 1)
-			// if err != nil {
-			// 	return err
-			// }
-
-			// dstCommitRes, err := chains[dst].QueryPacketCommitment(hs[dst].Height, int64(seqSend))
-			// if err != nil {
-			// 	return err
-			// }
-
-			txs := []sdk.Msg{
-				chains[src].PathEnd.UpdateClient(hs[dst], chains[src].MustGetAddress()),
-				chains[src].PathEnd.MsgRecvPacket(
-					chains[dst].PathEnd,
-					seqRecv.NextSequenceRecv,
-					chains[src].PathEnd.XferPacket(
-						sdk.NewCoins(),
-						chains[src].MustGetAddress(),
-						chains[src].MustGetAddress(),
-						false,
-						19291024),
-					chanTypes.PacketResponse{},
-					chains[src].MustGetAddress(),
-				),
-			}
-
-			return sendAndPrint(txs, chains[src], cmd)
-		},
+func setPathsFromArgs(src, dst *relayer.Chain, name string) (*relayer.Path, error) {
+	// Find any configured paths between the chains
+	paths, err := config.Paths.PathsFromChains(src.ChainID, dst.ChainID)
+	if err != nil {
+		return nil, err
 	}
-	return cmd
+
+	// Given the number of args and the number of paths,
+	// work on the appropriate path
+	var path *relayer.Path
+	switch {
+	case name != "" && len(paths) > 1:
+		if path, err = paths.Get(name); err != nil {
+			return path, err
+		}
+	case name != "" && len(paths) == 1:
+		if path, err = paths.Get(name); err != nil {
+			return path, err
+		}
+	case name == "" && len(paths) > 1:
+		return nil, fmt.Errorf("more than one path between %s and %s exists, pass in path name", src.ChainID, dst.ChainID)
+	case name == "" && len(paths) == 1:
+		for _, v := range paths {
+			path = v
+		}
+	}
+
+	if err = src.SetPath(path.End(src.ChainID)); err != nil {
+		return nil, err
+	}
+
+	if err = dst.SetPath(path.End(dst.ChainID)); err != nil {
+		return nil, err
+	}
+
+	return path, nil
 }

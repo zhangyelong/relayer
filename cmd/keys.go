@@ -16,70 +16,111 @@ limitations under the License.
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
+	"strings"
 
 	ckeys "github.com/cosmos/cosmos-sdk/client/keys"
-	"github.com/cosmos/cosmos-sdk/crypto/keys"
-	"github.com/cosmos/go-bip39"
+	"github.com/cosmos/cosmos-sdk/crypto/hd"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+
+	"github.com/cosmos/relayer/relayer"
 )
 
-func init() {
-	keysCmd.AddCommand(keysAddCmd())
-	keysCmd.AddCommand(keysRestoreCmd())
-	keysCmd.AddCommand(keysDeleteCmd())
-	keysCmd.AddCommand(keysListCmd())
-	keysCmd.AddCommand(keysShowCmd())
-	keysCmd.AddCommand(keysExportCmd())
-}
+const (
+	flagCoinType = "coin-type"
+)
 
 // keysCmd represents the keys command
-var keysCmd = &cobra.Command{
-	Use:   "keys",
-	Short: "helps users manage keys for multiple chains",
+func keysCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "keys",
+		Aliases: []string{"k"},
+		Short:   "manage keys held by the relayer for each chain",
+	}
+
+	cmd.AddCommand(keysAddCmd())
+	cmd.AddCommand(keysRestoreCmd())
+	cmd.AddCommand(keysDeleteCmd())
+	cmd.AddCommand(keysListCmd())
+	cmd.AddCommand(keysShowCmd())
+	cmd.AddCommand(keysExportCmd())
+
+	return cmd
 }
 
 // keysAddCmd respresents the `keys add` command
 func keysAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "add [chain-id] [name]",
-		Short: "adds a key to the keychain associated with a particular chain",
-		Args:  cobra.ExactArgs(2),
+		Use:     "add [chain-id] [[name]]",
+		Aliases: []string{"a"},
+		Short:   "adds a key to the keychain associated with a particular chain",
+		Args:    cobra.RangeArgs(1, 2),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s keys add ibc-0
+$ %s keys add ibc-1 key2
+$ %s k a ibc-2 testkey`, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			keyName := args[1]
 			chain, err := config.Chains.Get(args[0])
 			if err != nil {
 				return err
 			}
 
-			mnemonic, err := createMnemonic()
-			if err != nil {
-				return err
+			var keyName string
+			if len(args) == 2 {
+				keyName = args[1]
+			} else {
+				keyName = chain.Key
 			}
 
-			if keyExists(chain.Keybase, keyName) {
+			if chain.KeyExists(keyName) {
 				return errKeyExists(keyName)
 			}
 
-			info, err := chain.Keybase.CreateAccount(keyName, mnemonic, "", ckeys.DefaultKeyPass, keys.CreateHDPath(0, 0).String(), keys.Secp256k1)
+			mnemonic, err := relayer.CreateMnemonic()
 			if err != nil {
 				return err
 			}
 
-			return queryOutput(info, chain, cmd)
+			coinType, _ := cmd.Flags().GetUint32(flagCoinType)
+
+			info, err := chain.Keybase.NewAccount(keyName, mnemonic, "", hd.CreateHDPath(coinType, 0, 0).String(), hd.Secp256k1)
+			if err != nil {
+				return err
+			}
+
+			ko := keyOutput{Mnemonic: mnemonic, Address: info.GetAddress().String()}
+
+			out, err := json.Marshal(&ko)
+			if err != nil {
+				return err
+			}
+
+			fmt.Println(string(out))
+			return nil
 		},
 	}
+	cmd.Flags().Uint32(flagCoinType, 118, "coin type number for HD derivation")
 
-	return outputFlags(cmd)
+	return cmd
+}
+
+type keyOutput struct {
+	Mnemonic string `json:"mnemonic" yaml:"mnemonic"`
+	Address  string `json:"address" yaml:"address"`
 }
 
 // keysRestoreCmd respresents the `keys add` command
 func keysRestoreCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "restore [chain-id] [name] [mnemonic]",
-		Short: "restores a mnemonic to the keychain associated with a particular chain",
-		Args:  cobra.ExactArgs(3),
+		Use:     "restore [chain-id] [name] [mnemonic]",
+		Aliases: []string{"r"},
+		Short:   "restores a mnemonic to the keychain associated with a particular chain",
+		Args:    cobra.ExactArgs(3),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s keys restore ibc-0 testkey "[mnemonic-words]"
+$ %s k r ibc-1 faucet-key "[mnemonic-words]"`, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			keyName := args[1]
 			chain, err := config.Chains.Get(args[0])
@@ -87,46 +128,63 @@ func keysRestoreCmd() *cobra.Command {
 				return err
 			}
 
-			if keyExists(chain.Keybase, keyName) {
+			if chain.KeyExists(keyName) {
 				return errKeyExists(keyName)
 			}
 
-			info, err := chain.Keybase.CreateAccount(keyName, args[2], "", ckeys.DefaultKeyPass, keys.CreateHDPath(0, 0).String(), keys.Secp256k1)
+			coinType, _ := cmd.Flags().GetUint32(flagCoinType)
+
+			info, err := chain.Keybase.NewAccount(keyName, args[2], "", hd.CreateHDPath(coinType, 0, 0).String(), hd.Secp256k1)
 			if err != nil {
 				return err
 			}
 
-			printAddress, _ := cmd.Flags().GetBool(flagAddress)
-			if printAddress {
-				fmt.Println(info.GetAddress().String())
-				return nil
-			}
-
-			return queryOutput(info, chain, cmd)
+			defer chain.UseSDKContext()()
+			fmt.Println(info.GetAddress().String())
+			return nil
 		},
 	}
+	cmd.Flags().Uint32(flagCoinType, 118, "coin type number for HD derivation")
 
-	return addressFlag(outputFlags(cmd))
+	return cmd
 }
 
 // keysDeleteCmd respresents the `keys delete` command
 func keysDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "delete [chain-id] [name]",
-		Short: "deletes a key from the keychain associated with a particular chain",
-		Args:  cobra.ExactArgs(2),
+		Use:     "delete [chain-id] [[name]]",
+		Aliases: []string{"d"},
+		Short:   "deletes a key from the keychain associated with a particular chain",
+		Args:    cobra.RangeArgs(1, 2),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s keys delete ibc-0 -y
+$ %s keys delete ibc-1 key2 -y
+$ %s k d ibc-2 testkey`, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			keyName := args[1]
 			chain, err := config.Chains.Get(args[0])
 			if err != nil {
 				return err
 			}
 
-			if !keyExists(chain.Keybase, keyName) {
+			var keyName string
+			if len(args) == 2 {
+				keyName = args[1]
+			} else {
+				keyName = chain.Key
+			}
+
+			if !chain.KeyExists(keyName) {
 				return errKeyDoesntExist(keyName)
 			}
 
-			err = chain.Keybase.Delete(keyName, ckeys.DefaultKeyPass, true)
+			if skip, _ := cmd.Flags().GetBool(flagSkip); !skip {
+				fmt.Printf("Are you sure you want to delete key(%s) from chain(%s)? (Y/n)\n", keyName, args[0])
+				if !askForConfirmation() {
+					return nil
+				}
+			}
+
+			err = chain.Keybase.Delete(keyName)
 			if err != nil {
 				panic(err)
 			}
@@ -136,15 +194,38 @@ func keysDeleteCmd() *cobra.Command {
 		},
 	}
 
-	return cmd
+	return skipConfirm(cmd)
+}
+
+func askForConfirmation() bool {
+	var response string
+
+	_, err := fmt.Scanln(&response)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	switch strings.ToLower(response) {
+	case "y", "yes":
+		return true
+	case "n", "no":
+		return false
+	default:
+		fmt.Println("please type (y)es or (n)o and then press enter")
+		return askForConfirmation()
+	}
 }
 
 // keysListCmd respresents the `keys list` command
 func keysListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list [chain-id]",
-		Short: "lists keys from the keychain associated with a particular chain",
-		Args:  cobra.ExactArgs(1),
+		Use:     "list [chain-id]",
+		Aliases: []string{"l"},
+		Short:   "lists keys from the keychain associated with a particular chain",
+		Args:    cobra.ExactArgs(1),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s keys list ibc-0
+$ %s k l ibc-1`, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			chain, err := config.Chains.Get(args[0])
 			if err != nil {
@@ -170,43 +251,54 @@ func keysListCmd() *cobra.Command {
 // keysShowCmd respresents the `keys show` command
 func keysShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "show [chain-id] [name]",
-		Short: "shows a key from the keychain associated with a particular chain",
-		Args:  cobra.ExactArgs(2),
+		Use:     "show [chain-id] [[name]]",
+		Aliases: []string{"s"},
+		Short:   "shows a key from the keychain associated with a particular chain",
+		Args:    cobra.RangeArgs(1, 2),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s keys show ibc-0
+$ %s keys show ibc-1 key2
+$ %s k s ibc-2 testkey`, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			keyName := args[1]
 			chain, err := config.Chains.Get(args[0])
 			if err != nil {
 				return err
 			}
 
-			if !keyExists(chain.Keybase, keyName) {
+			var keyName string
+			if len(args) == 2 {
+				keyName = args[1]
+			} else {
+				keyName = chain.Key
+			}
+
+			if !chain.KeyExists(keyName) {
 				return errKeyDoesntExist(keyName)
 			}
 
-			info, err := chain.Keybase.Get(keyName)
+			info, err := chain.Keybase.Key(keyName)
 			if err != nil {
 				return err
 			}
 
-			if viper.GetBool(flagAddress) {
-				fmt.Println(info.GetAddress().String())
-				return nil
-			}
-
-			return queryOutput(info, chain, cmd)
+			fmt.Println(info.GetAddress().String())
+			return nil
 		},
 	}
 
-	return addressFlag(outputFlags(cmd))
+	return cmd
 }
 
 // keysExportCmd respresents the `keys export` command
 func keysExportCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "export [chain-id] [name]",
-		Short: "exports a privkey from the keychain associated with a particular chain",
-		Args:  cobra.ExactArgs(2),
+		Use:     "export [chain-id] [name]",
+		Aliases: []string{"e"},
+		Short:   "exports a privkey from the keychain associated with a particular chain",
+		Args:    cobra.ExactArgs(2),
+		Example: strings.TrimSpace(fmt.Sprintf(`
+$ %s keys export ibc-0 testkey
+$ %s k e ibc-2 testkey`, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			keyName := args[1]
 			chain, err := config.Chains.Get(args[0])
@@ -214,46 +306,19 @@ func keysExportCmd() *cobra.Command {
 				return err
 			}
 
-			if !keyExists(chain.Keybase, keyName) {
+			if !chain.KeyExists(keyName) {
 				return errKeyDoesntExist(keyName)
 			}
 
-			info, err := chain.Keybase.ExportPrivKey(keyName, ckeys.DefaultKeyPass, ckeys.DefaultKeyPass)
+			info, err := chain.Keybase.ExportPrivKeyArmor(keyName, ckeys.DefaultKeyPass)
 			if err != nil {
 				return err
 			}
 
-			return queryOutput(info, chain, cmd)
+			fmt.Println(info)
+			return nil
 		},
 	}
 
-	return outputFlags(cmd)
-}
-
-// returns true if there is a specified key in the keybase
-func keyExists(kb keys.Keybase, name string) bool {
-	keyInfos, err := kb.List()
-	if err != nil {
-		return false
-	}
-
-	for _, k := range keyInfos {
-		if k.GetName() == name {
-			return true
-		}
-	}
-	return false
-}
-
-// Returns a new mnemonic
-func createMnemonic() (string, error) {
-	entropySeed, err := bip39.NewEntropy(256)
-	if err != nil {
-		return "", err
-	}
-	mnemonic, err := bip39.NewMnemonic(entropySeed)
-	if err != nil {
-		return "", err
-	}
-	return mnemonic, nil
+	return cmd
 }
