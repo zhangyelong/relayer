@@ -1,8 +1,13 @@
 VERSION := $(shell echo $(shell git describe --tags) | sed 's/^v//')
 COMMIT  := $(shell git log -1 --format='%H')
 SDKCOMMIT := $(shell go list -m -u -f '{{.Version}}' github.com/cosmos/cosmos-sdk)
-GAIA_VERSION := main
-AKASH_VERSION := jack/update-sdk
+GAIA_VERSION := v4.1.0
+AKASH_VERSION := v0.10.2
+WASMD_VERSION := v0.14.1
+
+GOPATH := $(shell go env GOPATH)
+GOBIN := $(GOPATH)/bin
+
 all: ci-lint install
 
 ###############################################################################
@@ -38,11 +43,20 @@ compile-clib:
 
 install: go.sum
 	@echo "installing rly binary..."
-	@go build -mod=readonly $(BUILD_FLAGS) -o $${GOBIN-$${GOPATH-$$HOME/go}/bin}/rly main.go
+	@go build -mod=readonly $(BUILD_FLAGS) -o $(GOBIN)/rly main.go
 
 ###############################################################################
 # Tests / CI
 ###############################################################################
+
+two-chains:
+	@docker-compose -f ./two-chains/docker-compose.yaml down
+	@rm -fr ./two-chains/ibc-* ./two-chains/.relayer ./two-chains/rly.log
+	@docker-compose -f ./two-chains/docker-compose.yaml up -d
+	@while ! curl localhost:26657 &> /dev/null; do sleep 1; done
+	@while ! curl localhost:26667 &> /dev/null; do sleep 1; done
+	@cd ./two-chains && sh relayer-setup && cd ..
+
 test:
 	@TEST_DEBUG=true go test -mod=readonly -v ./test/...
 
@@ -60,8 +74,6 @@ lint:
 	@golangci-lint run
 	@find . -name '*.go' -type f -not -path "*.git*" | xargs gofmt -d -s
 	@go mod verify
-
-.PHONY: install build lint coverage clean
 
 ###############################################################################
 # Chain Code Downloads
@@ -81,8 +93,23 @@ get-akash:
 	@mkdir -p ./chain-code/
 	@git clone --branch $(AKASH_VERSION) git@github.com:ovrclk/akash.git ./chain-code/akash
 
-get-chains: get-gaia get-akash
+get-chains: get-gaia get-akash get-wasmd
+
+get-wasmd:
+	@mkdir -p ./chain-code/
+	@git clone --branch $(WASMD_VERSION) git@github.com:CosmWasm/wasmd.git ./chain-code/wasmd
+
+build-wasmd:
+	@./scripts/build-wasmd
 
 delete-chains: 
 	@echo "Removing the ./chain-code/ directory..."
 	@rm -rf ./chain-code
+
+check-swagger:
+	which swagger || (GO111MODULE=off go get -u github.com/go-swagger/go-swagger/cmd/swagger)
+
+update-swagger-docs: check-swagger
+	swagger generate spec -o ./docs/swagger-ui/swagger.yaml
+
+.PHONY: two-chains test install build lint coverage clean

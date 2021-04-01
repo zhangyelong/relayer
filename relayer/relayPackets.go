@@ -11,16 +11,16 @@ import (
 
 type relayPacket interface {
 	Msg(src, dst *Chain) (sdk.Msg, error)
-	FetchCommitResponse(src, dst *Chain, sh *SyncHeaders) error
+	FetchCommitResponse(src, dst *Chain) error
 	Data() []byte
 	Seq() uint64
-	Timeout() uint64
+	Timeout() clienttypes.Height
 }
 
 type relayMsgTimeout struct {
 	packetData   []byte
 	seq          uint64
-	timeout      uint64
+	timeout      clienttypes.Height
 	timeoutStamp uint64
 	dstRecvRes   *chantypes.QueryPacketReceiptResponse
 
@@ -35,44 +35,47 @@ func (rp *relayMsgTimeout) Seq() uint64 {
 	return rp.seq
 }
 
-func (rp *relayMsgTimeout) Timeout() uint64 {
+func (rp *relayMsgTimeout) Timeout() clienttypes.Height {
 	return rp.timeout
 }
 
-func (rp *relayMsgTimeout) FetchCommitResponse(src, dst *Chain, sh *SyncHeaders) (err error) {
+func (rp *relayMsgTimeout) FetchCommitResponse(src, dst *Chain) (err error) {
 	var dstRecvRes *chantypes.QueryPacketReceiptResponse
 	// retry getting commit response until it succeeds
 	if err = retry.Do(func() error {
 		// NOTE: Timeouts currently only work with ORDERED channels for nwo
-		queryHeight := sh.GetHeight(dst.ChainID) - 1
-		dstRecvRes, err = dst.QueryPacketReciept(int64(queryHeight), rp.seq)
+		// NOTE: the proof height uses - 1 due to tendermint's delayed execution model
+		queryHeight := dst.MustGetLatestLightHeight() - 1
+		dstRecvRes, err = dst.QueryPacketReceipt(int64(queryHeight), rp.seq)
 		switch {
 		case err != nil:
 			return err
 		case dstRecvRes.Proof == nil:
-			return fmt.Errorf("timeout packet reciept proof seq(%d) is nil", rp.seq)
+			return fmt.Errorf("timeout packet receipt proof seq(%d) is nil", rp.seq)
 		default:
 			return nil
 		}
 	}, rtyAtt, rtyDel, rtyErr, retry.OnRetry(func(n uint, err error) {
-		// OnRetry we want to update the headers and then debug log
-		sh.Updates(src, dst)
+		// OnRetry we want to update the light clients and then debug log
+		if _, _, err := UpdateLightClients(src, dst); err != nil {
+			return
+		}
 		if dst.debug {
-			dst.Log(fmt.Sprintf("- [%s]@{%d} - try(%d/%d) query packet reciept: %s", dst.ChainID, sh.GetHeight(dst.ChainID)-1, n+1, rtyAttNum, err))
+			dst.Log(fmt.Sprintf("- [%s]@{%d} - try(%d/%d) query packet receipt: %s", dst.ChainID,
+				dst.MustGetLatestLightHeight()-1, n+1, rtyAttNum, err))
 		}
 	})); err != nil {
 		dst.Error(err)
 		return
 	}
 	rp.dstRecvRes = dstRecvRes
-	return
+	return nil
 }
 
 func (rp *relayMsgTimeout) Msg(src, dst *Chain) (sdk.Msg, error) {
 	if rp.dstRecvRes == nil {
 		return nil, fmt.Errorf("timeout packet [%s]seq{%d} has no associated proofs", src.ChainID, rp.seq)
 	}
-	version := clienttypes.ParseChainID(dst.PathEnd.ChainID)
 	msg := chantypes.NewMsgTimeout(
 		chantypes.NewPacket(
 			rp.packetData,
@@ -81,7 +84,7 @@ func (rp *relayMsgTimeout) Msg(src, dst *Chain) (sdk.Msg, error) {
 			src.PathEnd.ChannelID,
 			dst.PathEnd.PortID,
 			dst.PathEnd.ChannelID,
-			clienttypes.NewHeight(version, rp.timeout),
+			rp.timeout,
 			rp.timeoutStamp,
 		),
 		rp.seq,
@@ -95,7 +98,7 @@ func (rp *relayMsgTimeout) Msg(src, dst *Chain) (sdk.Msg, error) {
 type relayMsgRecvPacket struct {
 	packetData   []byte
 	seq          uint64
-	timeout      uint64
+	timeout      clienttypes.Height
 	timeoutStamp uint64
 	dstComRes    *chantypes.QueryPacketCommitmentResponse
 
@@ -121,15 +124,16 @@ func (rp *relayMsgRecvPacket) Seq() uint64 {
 	return rp.seq
 }
 
-func (rp *relayMsgRecvPacket) Timeout() uint64 {
+func (rp *relayMsgRecvPacket) Timeout() clienttypes.Height {
 	return rp.timeout
 }
 
-func (rp *relayMsgRecvPacket) FetchCommitResponse(src, dst *Chain, sh *SyncHeaders) (err error) {
+func (rp *relayMsgRecvPacket) FetchCommitResponse(src, dst *Chain) (err error) {
 	var dstCommitRes *chantypes.QueryPacketCommitmentResponse
 	// retry getting commit response until it succeeds
 	if err = retry.Do(func() error {
-		dstCommitRes, err = dst.QueryPacketCommitment(sh.GetHeader(dst.ChainID).Header.Height-1, rp.seq)
+		// NOTE: the proof height uses - 1 due to tendermint's delayed execution model
+		dstCommitRes, err = dst.QueryPacketCommitment(int64(dst.MustGetLatestLightHeight()-1), rp.seq)
 		switch {
 		case err != nil:
 			return err
@@ -141,25 +145,26 @@ func (rp *relayMsgRecvPacket) FetchCommitResponse(src, dst *Chain, sh *SyncHeade
 			return nil
 		}
 	}, rtyAtt, rtyDel, rtyErr, retry.OnRetry(func(n uint, err error) {
-		// OnRetry we want to update the headers and then debug log
-		sh.Updates(src, dst)
+		// OnRetry we want to update the light clients and then debug log
+		if _, _, err := UpdateLightClients(src, dst); err != nil {
+			return
+		}
 		if dst.debug {
-			dst.Log(fmt.Sprintf("- [%s]@{%d} - try(%d/%d) query packet commitment: %s", dst.ChainID, sh.GetHeight(dst.ChainID)-1, n+1, rtyAttNum, err))
+			dst.Log(fmt.Sprintf("- [%s]@{%d} - try(%d/%d) query packet commitment: %s", dst.ChainID,
+				dst.MustGetLatestLightHeight()-1, n+1, rtyAttNum, err))
 		}
 	})); err != nil {
 		dst.Error(err)
 		return
 	}
-
 	rp.dstComRes = dstCommitRes
-	return
+	return nil
 }
 
 func (rp *relayMsgRecvPacket) Msg(src, dst *Chain) (sdk.Msg, error) {
 	if rp.dstComRes == nil {
-		return nil, fmt.Errorf("recieve packet [%s]seq{%d} has no associated proofs", src.ChainID, rp.seq)
+		return nil, fmt.Errorf("receive packet [%s]seq{%d} has no associated proofs", src.ChainID, rp.seq)
 	}
-	version := clienttypes.ParseChainID(src.PathEnd.ChainID)
 	packet := chantypes.NewPacket(
 		rp.packetData,
 		rp.seq,
@@ -167,7 +172,7 @@ func (rp *relayMsgRecvPacket) Msg(src, dst *Chain) (sdk.Msg, error) {
 		dst.PathEnd.ChannelID,
 		src.PathEnd.PortID,
 		src.PathEnd.ChannelID,
-		clienttypes.NewHeight(version, rp.timeout),
+		rp.timeout,
 		rp.timeoutStamp,
 	)
 	msg := chantypes.NewMsgRecvPacket(
@@ -183,7 +188,7 @@ type relayMsgPacketAck struct {
 	packetData   []byte
 	ack          []byte
 	seq          uint64
-	timeout      uint64
+	timeout      clienttypes.Height
 	timeoutStamp uint64
 	dstComRes    *chantypes.QueryPacketAcknowledgementResponse
 
@@ -196,7 +201,7 @@ func (rp *relayMsgPacketAck) Data() []byte {
 func (rp *relayMsgPacketAck) Seq() uint64 {
 	return rp.seq
 }
-func (rp *relayMsgPacketAck) Timeout() uint64 {
+func (rp *relayMsgPacketAck) Timeout() clienttypes.Height {
 	return rp.timeout
 }
 
@@ -204,7 +209,6 @@ func (rp *relayMsgPacketAck) Msg(src, dst *Chain) (sdk.Msg, error) {
 	if rp.dstComRes == nil {
 		return nil, fmt.Errorf("ack packet [%s]seq{%d} has no associated proofs", src.ChainID, rp.seq)
 	}
-	version := clienttypes.ParseChainID(dst.PathEnd.ChainID)
 	msg := chantypes.NewMsgAcknowledgement(
 		chantypes.NewPacket(
 			rp.packetData,
@@ -213,7 +217,7 @@ func (rp *relayMsgPacketAck) Msg(src, dst *Chain) (sdk.Msg, error) {
 			src.PathEnd.ChannelID,
 			dst.PathEnd.PortID,
 			dst.PathEnd.ChannelID,
-			clienttypes.NewHeight(version, rp.timeout),
+			rp.timeout,
 			rp.timeoutStamp,
 		),
 		rp.ack,
@@ -224,11 +228,12 @@ func (rp *relayMsgPacketAck) Msg(src, dst *Chain) (sdk.Msg, error) {
 	return msg, nil
 }
 
-func (rp *relayMsgPacketAck) FetchCommitResponse(src, dst *Chain, sh *SyncHeaders) (err error) {
+func (rp *relayMsgPacketAck) FetchCommitResponse(src, dst *Chain) (err error) {
 	var dstCommitRes *chantypes.QueryPacketAcknowledgementResponse
 	// retry getting commit response until it succeeds
 	if err = retry.Do(func() error {
-		dstCommitRes, err = dst.QueryPacketAcknowledgement(sh.GetHeader(dst.ChainID).Header.Height-1, rp.seq)
+		// NOTE: the proof height uses - 1 due to tendermint's delayed execution model
+		dstCommitRes, err = dst.QueryPacketAcknowledgement(int64(dst.MustGetLatestLightHeight())-1, rp.seq)
 		switch {
 		case err != nil:
 			return err
@@ -240,10 +245,13 @@ func (rp *relayMsgPacketAck) FetchCommitResponse(src, dst *Chain, sh *SyncHeader
 			return nil
 		}
 	}, rtyAtt, rtyDel, rtyErr, retry.OnRetry(func(n uint, err error) {
-		// OnRetry we want to update the headers and then debug log
-		sh.Updates(src, dst)
+		// OnRetry we want to update the light clients and then debug log
+		if _, _, err := UpdateLightClients(src, dst); err != nil {
+			return
+		}
 		if dst.debug {
-			dst.Log(fmt.Sprintf("- [%s]@{%d} - try(%d/%d) query packet acknowledgement: %s", dst.ChainID, sh.GetHeight(dst.ChainID)-1, n+1, rtyAttNum, err))
+			dst.Log(fmt.Sprintf("- [%s]@{%d} - try(%d/%d) query packet acknowledgement: %s",
+				dst.ChainID, dst.MustGetLatestLightHeight()-1, n+1, rtyAttNum, err))
 		}
 	})); err != nil {
 		dst.Error(err)
